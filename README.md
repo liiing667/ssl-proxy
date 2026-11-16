@@ -32,6 +32,13 @@ You can provide your own existing certs, of course. Jenkins still has issues ser
 ### Redirect HTTP -> HTTPS
 Simply include the `-redirectHTTP` flag when running the program.
 
+### Proxying to an HTTPS upstream
+When the `-to` URL uses `https://`, ssl-proxy always verifies the upstream's TLS certificate: the TLS ServerName (SNI) is pinned to the `-to` host and the certificate chain must verify against the system roots. Upstreams with self-signed or otherwise privately-issued certificates can be trusted by supplying their CA (or the self-signed certificate itself) as a PEM bundle:
+```sh
+ssl-proxy -from 0.0.0.0:4430 -to https://127.0.0.1:8443 -toCA upstream-ca.pem
+```
+Verification fails closed--an untrusted or hostname-mismatched upstream certificate aborts the connection, and an unreadable or invalid `-toCA` file prevents startup.
+
 ## Installation
 Simply download and uncompress the proper prebuilt binary for your system from the [releases tab](https://github.com/suyashkumar/ssl-proxy/releases/). Then, add the binary to your path or start using it locally (`./ssl-proxy`).
 

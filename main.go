@@ -22,6 +22,7 @@ var (
 	keyFile      = flag.String("key", "", "path to a private key file. If not provided, ssl-proxy will generate one for you in ~/.ssl-proxy/")
 	domain       = flag.String("domain", "", "domain to mint letsencrypt certificates for. Usage of this parameter implies acceptance of the LetsEncrypt terms of service.")
 	redirectHTTP = flag.Bool("redirectHTTP", false, "if true, redirects http requests from port 80 to https at your fromURL")
+	toCA         = flag.String("toCA", "", "path to a PEM CA bundle used to verify the upstream TLS certificate when proxying to an https -to URL (in addition to the system roots)")
 )
 
 const (
@@ -81,7 +82,10 @@ func main() {
 	}
 
 	// Setup reverse proxy ServeMux
-	p := reverseproxy.Build(toURL)
+	p, err := reverseproxy.Build(toURL, *toCA)
+	if err != nil {
+		log.Fatal("Unable to configure upstream TLS verification: ", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", p)
 
