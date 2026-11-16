@@ -51,8 +51,10 @@ func TestNewDirector(t *testing.T) {
 	if got, want := testReq.URL.String(), expectedReq.URL.String(); got != want {
 		t.Errorf("URL: got %q, want %q", got, want)
 	}
-	if got, want := testReq.Host, expectedReq.Host; got != want {
-		t.Errorf("Host: got %q, want %q", got, want)
+	// Unlike httputil.NewSingleHostReverseProxy, which preserves the client
+	// Host, this director resolves the Host conflict in favor of the target.
+	if got, want := testReq.Host, u.Host; got != want {
+		t.Errorf("Host: got %q, want target host %q", got, want)
 	}
 	if got, want := testReq.RemoteAddr, expectedReq.RemoteAddr; got != want {
 		t.Errorf("RemoteAddr: got %q, want %q", got, want)

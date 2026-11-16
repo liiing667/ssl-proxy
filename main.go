@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -80,10 +81,10 @@ func main() {
 		log.Fatal("Unable to parse 'to' url: ", err)
 	}
 
-	// Setup reverse proxy ServeMux
-	p := reverseproxy.Build(toURL)
-	mux := http.NewServeMux()
-	mux.Handle("/", p)
+	// Setup the framing-validating reverse proxy. Requests with illegal or
+	// ambiguous framing are rejected before any header normalization and
+	// forwarding upstream happens.
+	proxyServer := reverseproxy.NewServer(*fromURL, toURL)
 
 	log.Printf(green("Proxying calls from https://%s (SSL/TLS) to %s"), *fromURL, toURL)
 
@@ -123,15 +124,19 @@ func main() {
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(*domain),
 		}
-		s := &http.Server{
-			Addr:      *fromURL,
-			TLSConfig: m.TLSConfig(),
+		proxyServer.TLSConfig = m.TLSConfig()
+		listener, err := net.Listen("tcp", *fromURL)
+		if err != nil {
+			log.Fatal(err)
 		}
-		s.Handler = mux
-		log.Fatal(s.ListenAndServeTLS("", ""))
+		log.Fatal(reverseproxy.ServeTLS(proxyServer, listener, "", ""))
 	} else {
 		// Domain is not provided, serve TLS using provided/generated certificate files
-		log.Fatal(http.ListenAndServeTLS(*fromURL, *certFile, *keyFile, mux))
+		listener, err := net.Listen("tcp", *fromURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Fatal(reverseproxy.ServeTLS(proxyServer, listener, *certFile, *keyFile))
 	}
 
 }
