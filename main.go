@@ -1,9 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +27,7 @@ var (
 	keyFile      = flag.String("key", "", "path to a private key file. If not provided, ssl-proxy will generate one for you in ~/.ssl-proxy/")
 	domain       = flag.String("domain", "", "domain to mint letsencrypt certificates for. Usage of this parameter implies acceptance of the LetsEncrypt terms of service.")
 	redirectHTTP = flag.Bool("redirectHTTP", false, "if true, redirects http requests from port 80 to https at your fromURL")
+	toCertPin    = flag.String("toCertPin", "", "hex-encoded SHA-256 fingerprint of the upstream (-to) server's TLS certificate. When proxying to an https:// upstream, connections fail closed unless the peer certificate matches this pin")
 )
 
 const (
@@ -82,8 +88,26 @@ func main() {
 
 	// Setup reverse proxy ServeMux
 	p := reverseproxy.Build(toURL)
+	if *toCertPin != "" {
+		if toURL.Scheme != "https" {
+			log.Fatal("-toCertPin requires an https:// -to URL")
+		}
+		pin, err := parseCertPin(*toCertPin)
+		if err != nil {
+			log.Fatal("Invalid -toCertPin: ", err)
+		}
+		p.Transport = reverseproxy.NewSecureTransport(reverseproxy.CertPins{toURL.Hostname(): pin})
+		// Evidence: bind the connection target to the certificate pin.
+		log.Printf("Pinning connections to upstream %s to certificate SHA256 fingerprint: % X", toURL.Host, pin)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", p)
+	var handler http.Handler = mux
+	if validDomain {
+		// Fail closed on requests whose Host header does not match the
+		// public-facing domain this proxy terminates TLS for.
+		handler = requireHost(*domain, mux)
+	}
 
 	log.Printf(green("Proxying calls from https://%s (SSL/TLS) to %s"), *fromURL, toURL)
 
@@ -95,13 +119,10 @@ func main() {
 		if validDomain {
 			redirectURL = *domain
 		}
-		redirectTLS := func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "https://"+redirectURL+r.RequestURI, http.StatusMovedPermanently)
-		}
 		go func() {
 			log.Println(
 				fmt.Sprintf("Also redirecting https requests on port 80 to https requests on %s", redirectURL))
-			err := http.ListenAndServe(":80", http.HandlerFunc(redirectTLS))
+			err := http.ListenAndServe(":80", redirectHandler(redirectURL))
 			if err != nil {
 				log.Println("HTTP redirection server failure")
 				log.Println(err)
@@ -123,17 +144,135 @@ func main() {
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(*domain),
 		}
+		tlsConfig := m.TLSConfig()
+		tlsConfig.MinVersion = tls.VersionTLS12
 		s := &http.Server{
 			Addr:      *fromURL,
-			TLSConfig: m.TLSConfig(),
+			TLSConfig: tlsConfig,
 		}
-		s.Handler = mux
+		s.Handler = handler
 		log.Fatal(s.ListenAndServeTLS("", ""))
 	} else {
 		// Domain is not provided, serve TLS using provided/generated certificate files
-		log.Fatal(http.ListenAndServeTLS(*fromURL, *certFile, *keyFile, mux))
+		tlsConfig, err := serverTLSConfig(*certFile, *keyFile, *domain)
+		if err != nil {
+			log.Fatal("Unable to set up TLS configuration: ", err)
+		}
+		s := &http.Server{
+			Addr:      *fromURL,
+			Handler:   handler,
+			TLSConfig: tlsConfig,
+		}
+		log.Fatal(s.ListenAndServeTLS("", ""))
 	}
 
+}
+
+// serverTLSConfig builds the TLS configuration for the serving (ingress) side.
+// It fails closed: TLS versions below 1.2 are disabled and, when an expected
+// host is known (via -domain or the served certificate's DNS names), client
+// hellos advertising a mismatched SNI are rejected. Clients that send no SNI
+// (for example, IP-based clients) remain supported.
+func serverTLSConfig(certFile, keyFile, expectedHost string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	if len(cert.Certificate) > 0 {
+		if leaf, err := x509.ParseCertificate(cert.Certificate[0]); err == nil {
+			cert.Leaf = leaf
+		}
+	}
+	config := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+	}
+	allowed := map[string]bool{}
+	if expectedHost != "" {
+		allowed[strings.ToLower(expectedHost)] = true
+	}
+	if cert.Leaf != nil {
+		for _, name := range cert.Leaf.DNSNames {
+			allowed[strings.ToLower(name)] = true
+		}
+	}
+	if len(allowed) > 0 {
+		config.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			sni := hello.ServerName
+			if sni == "" {
+				return nil, nil
+			}
+			if allowed[strings.ToLower(sni)] {
+				return nil, nil
+			}
+			if cert.Leaf != nil && cert.Leaf.VerifyHostname(sni) == nil {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("ssl-proxy: rejecting TLS handshake: SNI %q does not match the expected host", sni)
+		}
+	}
+	return config, nil
+}
+
+// requireHost fails closed on requests whose Host header does not match the
+// expected public host, so cross-host traffic is never served under this
+// proxy's trust context.
+func requireHost(expected string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(trimPort(r.Host), expected) {
+			http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// redirectHandler redirects plain-HTTP requests to the proxy's HTTPS endpoint.
+// The redirect target is built solely from the configured public host and a
+// clean origin-form request target; anything else (cross-host absolute-form
+// targets, protocol-relative "//host" paths) fails closed with a 400 instead
+// of producing an open redirect.
+func redirectHandler(redirectHost string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		target := r.RequestURI
+		if r.URL.Scheme != "" || r.URL.Host != "" {
+			// Absolute-form request target: only same-host targets are
+			// redirected, using the parsed path; cross-host targets fail closed.
+			if !strings.EqualFold(trimPort(r.URL.Host), trimPort(r.Host)) {
+				http.Error(w, "refusing to redirect cross-host request target", http.StatusBadRequest)
+				return
+			}
+			target = r.URL.RequestURI()
+		}
+		if strings.HasPrefix(target, "//") {
+			http.Error(w, "refusing to redirect ambiguous request target", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, "https://"+redirectHost+target, http.StatusMovedPermanently)
+	}
+}
+
+// parseCertPin parses a hex-encoded SHA-256 certificate fingerprint,
+// tolerating colons and spaces as separators.
+func parseCertPin(s string) ([32]byte, error) {
+	var pin [32]byte
+	cleaned := strings.NewReplacer(":", "", " ", "").Replace(s)
+	raw, err := hex.DecodeString(cleaned)
+	if err != nil {
+		return pin, fmt.Errorf("invalid certificate pin: %v", err)
+	}
+	if len(raw) != sha256.Size {
+		return pin, fmt.Errorf("invalid certificate pin: got %d bytes, want %d", len(raw), sha256.Size)
+	}
+	copy(pin[:], raw)
+	return pin, nil
+}
+
+func trimPort(hostport string) string {
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		return host
+	}
+	return hostport
 }
 
 // green takes an input string and returns it with the proper ANSI escape codes to render it green-colored

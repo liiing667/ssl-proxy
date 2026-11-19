@@ -32,6 +32,27 @@ You can provide your own existing certs, of course. Jenkins still has issues ser
 ### Redirect HTTP -> HTTPS
 Simply include the `-redirectHTTP` flag when running the program.
 
+### Pin the upstream certificate
+When proxying to an `https://` upstream, you can pin the upstream server's TLS
+certificate by its SHA-256 fingerprint:
+```sh
+ssl-proxy -from 0.0.0.0:4430 -to https://127.0.0.1:8443 -toCertPin 3b9f...e2
+```
+With `-toCertPin` set, egress connections fail closed: the SNI and hostname
+verification are bound to the actual connection target, and the upstream's
+certificate fingerprint must match the pin configured for that host. A
+certificate presented for any other host is never accepted under this pin.
+
+### Fail-closed behavior
+ssl-proxy fails closed on trust-boundary violations:
+* TLS versions below 1.2 are disabled on the serving side.
+* When an expected host is known (`-domain`, or DNS names on the served
+  certificate), TLS handshakes with a mismatched SNI are rejected, and HTTP
+  requests with a mismatched `Host` header receive `421 Misdirected Request`.
+* The HTTP -> HTTPS redirector only redirects clean origin-form request
+  targets to the configured public host; cross-host or protocol-relative
+  (`//host/...`) targets receive `400 Bad Request` instead of an open redirect.
+
 ## Installation
 Simply download and uncompress the proper prebuilt binary for your system from the [releases tab](https://github.com/suyashkumar/ssl-proxy/releases/). Then, add the binary to your path or start using it locally (`./ssl-proxy`).
 
