@@ -29,7 +29,28 @@ const (
 	DefaultKeyFile  = "key.pem"
 	HTTPSPrefix     = "https://"
 	HTTPPrefix      = "http://"
+
+	// Server-side timeouts. WriteTimeout is intentionally left as zero so
+	// long-lived, streamed, or upgraded (WebSocket) responses keep working;
+	// the read and idle timeouts bound half-closed or idle client connections
+	// so a stalled client cannot hold a goroutine and connection forever.
+	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 60 * time.Second
+	idleTimeout       = 120 * time.Second
 )
+
+// newServer builds an http.Server with bounded read and idle timeouts for the
+// given handler and address. A zero WriteTimeout preserves streaming and
+// protocol-upgrade semantics.
+func newServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
 
 func main() {
 	flag.Parse()
@@ -101,7 +122,8 @@ func main() {
 		go func() {
 			log.Println(
 				fmt.Sprintf("Also redirecting https requests on port 80 to https requests on %s", redirectURL))
-			err := http.ListenAndServe(":80", http.HandlerFunc(redirectTLS))
+			redirectServer := newServer(":80", http.HandlerFunc(redirectTLS))
+			err := redirectServer.ListenAndServe()
 			if err != nil {
 				log.Println("HTTP redirection server failure")
 				log.Println(err)
@@ -123,15 +145,13 @@ func main() {
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(*domain),
 		}
-		s := &http.Server{
-			Addr:      *fromURL,
-			TLSConfig: m.TLSConfig(),
-		}
-		s.Handler = mux
+		s := newServer(*fromURL, mux)
+		s.TLSConfig = m.TLSConfig()
 		log.Fatal(s.ListenAndServeTLS("", ""))
 	} else {
 		// Domain is not provided, serve TLS using provided/generated certificate files
-		log.Fatal(http.ListenAndServeTLS(*fromURL, *certFile, *keyFile, mux))
+		server := newServer(*fromURL, mux)
+		log.Fatal(server.ListenAndServeTLS(*certFile, *keyFile))
 	}
 
 }
