@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -22,6 +23,7 @@ var (
 	keyFile      = flag.String("key", "", "path to a private key file. If not provided, ssl-proxy will generate one for you in ~/.ssl-proxy/")
 	domain       = flag.String("domain", "", "domain to mint letsencrypt certificates for. Usage of this parameter implies acceptance of the LetsEncrypt terms of service.")
 	redirectHTTP = flag.Bool("redirectHTTP", false, "if true, redirects http requests from port 80 to https at your fromURL")
+	clientCAFile = flag.String("client-ca", "", "path to a PEM CA bundle used to verify TLS client certificates; when set, clients must present a certificate that chains to this bundle")
 )
 
 const (
@@ -80,10 +82,25 @@ func main() {
 		log.Fatal("Unable to parse 'to' url: ", err)
 	}
 
+	// Optionally require and authenticate TLS client certificates. When no
+	// client CA is configured the proxy behaves exactly as before.
+	var clientAuthenticator *reverseproxy.ClientAuthenticator
+	if *clientCAFile != "" {
+		caPEM, err := os.ReadFile(*clientCAFile)
+		if err != nil {
+			log.Fatalf("Unable to read client CA file %q: %v", *clientCAFile, err)
+		}
+		clientAuthenticator, err = reverseproxy.NewClientAuthenticator(caPEM)
+		if err != nil {
+			log.Fatalf("Unable to load client CA bundle %q: %v", *clientCAFile, err)
+		}
+		log.Printf("Client certificate authentication enabled using CA bundle %s", *clientCAFile)
+	}
+
 	// Setup reverse proxy ServeMux
-	p := reverseproxy.Build(toURL)
+	p := reverseproxy.BuildWithClientAuth(toURL, clientAuthenticator)
 	mux := http.NewServeMux()
-	mux.Handle("/", p)
+	mux.Handle("/", reverseproxy.ClientAuthMiddleware(clientAuthenticator, p))
 
 	log.Printf(green("Proxying calls from https://%s (SSL/TLS) to %s"), *fromURL, toURL)
 
@@ -131,7 +148,16 @@ func main() {
 		log.Fatal(s.ListenAndServeTLS("", ""))
 	} else {
 		// Domain is not provided, serve TLS using provided/generated certificate files
-		log.Fatal(http.ListenAndServeTLS(*fromURL, *certFile, *keyFile, mux))
+		server := &http.Server{
+			Addr:      *fromURL,
+			Handler:   mux,
+			TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+		if clientAuthenticator != nil {
+			server.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			server.TLSConfig.ClientCAs = clientAuthenticator.RootPool()
+		}
+		log.Fatal(server.ListenAndServeTLS(*certFile, *keyFile))
 	}
 
 }

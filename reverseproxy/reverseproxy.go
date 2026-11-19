@@ -14,7 +14,52 @@ func Build(toURL *url.URL) *httputil.ReverseProxy {
 		req.Header.Set(http.CanonicalHeaderKey("X-Forwarded-Proto"), "https")
 		req.Header.Set(http.CanonicalHeaderKey("X-Forwarded-Port"), "443") // TODO: inherit another port if needed
 	}
-	localProxy.Director = newDirector(toURL, addProxyHeaders)
+	localProxy.Director = newDirector(toURL, func(req *http.Request) {
+		stripInboundIdentityHeaders(req)
+		addProxyHeaders(req)
+	})
+
+	return localProxy
+}
+
+// ClientAuthMiddleware enforces client certificate authentication before the
+// request reaches the reverse proxy. When authenticator is nil the middleware
+// is a pass-through so existing deployments keep working unchanged.
+func ClientAuthMiddleware(authenticator *ClientAuthenticator, next http.Handler) http.Handler {
+	if authenticator == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil {
+			http.Error(w, "client certificate authentication required", http.StatusUnauthorized)
+			return
+		}
+		identity, err := authenticator.Authenticate(*r.TLS)
+		if err != nil {
+			http.Error(w, "client certificate authentication failed: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		ctx := contextWithClientIdentity(r.Context(), identity)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// BuildWithClientAuth initializes a ReverseProxy that authenticates clients
+// with authenticator and forwards their verified identity to the downstream
+// service. A nil authenticator is equivalent to Build.
+func BuildWithClientAuth(toURL *url.URL, authenticator *ClientAuthenticator) *httputil.ReverseProxy {
+	localProxy := &httputil.ReverseProxy{}
+	addProxyHeaders := func(req *http.Request) {
+		req.Header.Set(http.CanonicalHeaderKey("X-Forwarded-Proto"), "https")
+		req.Header.Set(http.CanonicalHeaderKey("X-Forwarded-Port"), "443")
+		if identity, ok := clientIdentityFromContext(req.Context()); ok {
+			AddIdentityHeaders(req, identity)
+		}
+	}
+	localProxy.Director = newDirector(toURL, func(req *http.Request) {
+		stripInboundIdentityHeaders(req)
+		addProxyHeaders(req)
+	})
 
 	return localProxy
 }

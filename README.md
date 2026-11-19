@@ -29,6 +29,14 @@ ssl-proxy -cert cert.pem -key myKey.pem -from 0.0.0.0:4430 -to 127.0.0.1:8000
 ```
 You can provide your own existing certs, of course. Jenkins still has issues serving the fullchain certs from letsencrypt properly, so this tool has come in handy for me there. 
 
+### Require and verify client certificates (mTLS)
+```sh
+ssl-proxy -cert cert.pem -key myKey.pem -client-ca client-ca.pem -from 0.0.0.0:4430 -to 127.0.0.1:8000
+```
+When `-client-ca` points to a PEM CA bundle, the proxy requires clients to present a TLS certificate that chains to that bundle. Certificates are rejected when the chain does not verify, the certificate is expired, or it lacks the client authentication key usage; such requests never reach the downstream server.
+
+For requests that authenticate successfully, the verified certificate's identity is forwarded to the downstream server in the `X-Forwarded-Client-Cert` (base64 DER), `X-Forwarded-Client-Cn`, and `X-Forwarded-Subject-Dn` headers. Any inbound headers with these or other common client-cert header names are stripped first, so downstream services can rely on the proxy-derived identity without being spoofable by the client. Without `-client-ca`, the proxy keeps its original behavior and does not request client certificates.
+
 ### Redirect HTTP -> HTTPS
 Simply include the `-redirectHTTP` flag when running the program.
 
