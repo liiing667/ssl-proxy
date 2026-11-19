@@ -32,6 +32,29 @@ You can provide your own existing certs, of course. Jenkins still has issues ser
 ### Redirect HTTP -> HTTPS
 Simply include the `-redirectHTTP` flag when running the program.
 
+## Framework-level secret redaction
+
+All proxy logging—TLS errors, access logs, request traces, audit events and
+the standard library error logger used for TLS handshake failures—runs through
+the `securelog` package, which enforces one shared, structured redaction rule
+set:
+
+- Credential-bearing headers (`Authorization`, `Proxy-Authorization`,
+  `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`) and
+  sensitive query parameters (`token`, `api_key`, `password`, `secret`,
+  `session`, ...) are replaced by `[REDACTED]` in every log event, including
+  free-form error strings and percent-encoded or line-split forms.
+- The fail-closed `securelog.SafeWriter` buffers raw bytes until a complete
+  log line is available, so a secret split across multiple writes or log
+  stages cannot be reassembled after the fact; if redaction itself fails, the
+  payload is suppressed rather than emitted verbatim.
+- Every request gets a correlation `X-Request-Id`, and audit events record the
+  names (never the values) of redacted headers and parameters, keeping success
+  and failure output attributable while secret material stays out of the logs.
+- Original credentials are still forwarded to the upstream unchanged, and
+  existing behavior such as proxy headers, the `Build` API and the empty-body
+  502 error response remain compatible.
+
 ## Installation
 Simply download and uncompress the proper prebuilt binary for your system from the [releases tab](https://github.com/suyashkumar/ssl-proxy/releases/). Then, add the binary to your path or start using it locally (`./ssl-proxy`).
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/suyashkumar/ssl-proxy/gen"
 	"github.com/suyashkumar/ssl-proxy/reverseproxy"
+	"github.com/suyashkumar/ssl-proxy/securelog"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -80,10 +81,15 @@ func main() {
 		log.Fatal("Unable to parse 'to' url: ", err)
 	}
 
+	// Framework-level protection: every log output (TLS errors, access logs,
+	// traces, audit events) flows through the fail-closed redacting logger.
+	secLogger := securelog.DefaultLogger()
+	log.SetOutput(secLogger.Writer())
+
 	// Setup reverse proxy ServeMux
-	p := reverseproxy.Build(toURL)
+	p := reverseproxy.BuildWithOptions(toURL, reverseproxy.WithLogger(secLogger))
 	mux := http.NewServeMux()
-	mux.Handle("/", p)
+	mux.Handle("/", secLogger.Middleware(p))
 
 	log.Printf(green("Proxying calls from https://%s (SSL/TLS) to %s"), *fromURL, toURL)
 
@@ -101,7 +107,12 @@ func main() {
 		go func() {
 			log.Println(
 				fmt.Sprintf("Also redirecting https requests on port 80 to https requests on %s", redirectURL))
-			err := http.ListenAndServe(":80", http.HandlerFunc(redirectTLS))
+			redirectServer := &http.Server{
+				Addr:     ":80",
+				Handler:  http.HandlerFunc(redirectTLS),
+				ErrorLog: secLogger.Std(),
+			}
+			err := redirectServer.ListenAndServe()
 			if err != nil {
 				log.Println("HTTP redirection server failure")
 				log.Println(err)
@@ -126,12 +137,18 @@ func main() {
 		s := &http.Server{
 			Addr:      *fromURL,
 			TLSConfig: m.TLSConfig(),
+			ErrorLog:  secLogger.Std(),
 		}
 		s.Handler = mux
 		log.Fatal(s.ListenAndServeTLS("", ""))
 	} else {
 		// Domain is not provided, serve TLS using provided/generated certificate files
-		log.Fatal(http.ListenAndServeTLS(*fromURL, *certFile, *keyFile, mux))
+		server := &http.Server{
+			Addr:     *fromURL,
+			Handler:  mux,
+			ErrorLog: secLogger.Std(),
+		}
+		log.Fatal(server.ListenAndServeTLS(*certFile, *keyFile))
 	}
 
 }
