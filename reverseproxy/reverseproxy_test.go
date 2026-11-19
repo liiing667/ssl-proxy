@@ -19,8 +19,11 @@ func TestBuild_AddHeaders(t *testing.T) {
 		t.Fatal("got nil, want non-nil proxy")
 	}
 
-	req := httptest.NewRequest("GET", "/test", nil)
-	proxy.Director(req)
+	in := httptest.NewRequest("GET", "/test", nil)
+	in.RemoteAddr = "127.0.0.1:9999"
+	out := in.Clone(in.Context())
+	proxy.Rewrite(&httputil.ProxyRequest{In: in, Out: out})
+	req := out
 
 	// Check that headers were added to req
 	if got := req.Header.Get(http.CanonicalHeaderKey("X-Forwarded-Proto")); got != "https" {
@@ -28,6 +31,9 @@ func TestBuild_AddHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get(http.CanonicalHeaderKey("X-Forwarded-Port")); got != "443" {
 		t.Errorf("X-Forwarded-Port: got %q, want %q", got, "443")
+	}
+	if got, want := req.Header.Get("X-Forwarded-For"), "127.0.0.1"; got != want {
+		t.Errorf("X-Forwarded-For: got %q, want %q", got, want)
 	}
 }
 

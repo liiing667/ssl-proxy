@@ -32,6 +32,26 @@ You can provide your own existing certs, of course. Jenkins still has issues ser
 ### Redirect HTTP -> HTTPS
 Simply include the `-redirectHTTP` flag when running the program.
 
+### Client identity and trusted proxies
+ssl-proxy resolves a single, authoritative client identity per request and shares it across proxy-header rewriting, TLS evidence, upstream selection, logging and the connection lifecycle. The direct peer address of the TLS connection is the only fact a client cannot control.
+
+By default, no proxy is trusted. Any `X-Forwarded-For`, `X-Real-Ip` or `Forwarded` header sent by a client that connects directly is discarded and can never change the identity observed by your upstream service (or any origin policy based on it). The upstream instead receives the sanitized direct peer address, for example:
+
+```
+X-Forwarded-For: 203.0.113.9
+X-Real-Ip: 203.0.113.9
+X-Forwarded-Proto: https
+X-Forwarded-Port: 443
+```
+
+When ssl-proxy itself runs behind a known reverse proxy or load balancer, list that hop (or its network) with `-trusted-proxies`. Only chains attested end to end by trusted proxies can influence the resolved identity; the first untrusted or malformed hop fails closed, so left-hand entries an attacker prepends are ignored:
+
+```sh
+ssl-proxy -from 0.0.0.0:4430 -to 127.0.0.1:8000 -trusted-proxies 10.0.0.0/8,192.168.1.5
+```
+
+Each request produces one lifecycle log line carrying the same identity sent upstream, plus a `rejected` field recording any discarded forged chain evidence.
+
 ## Installation
 Simply download and uncompress the proper prebuilt binary for your system from the [releases tab](https://github.com/suyashkumar/ssl-proxy/releases/). Then, add the binary to your path or start using it locally (`./ssl-proxy`).
 

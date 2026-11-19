@@ -10,18 +10,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/suyashkumar/ssl-proxy/clientidentity"
 	"github.com/suyashkumar/ssl-proxy/gen"
 	"github.com/suyashkumar/ssl-proxy/reverseproxy"
 	"golang.org/x/crypto/acme/autocert"
 )
 
 var (
-	to           = flag.String("to", "http://127.0.0.1:80", "the address and port for which to proxy requests to")
-	fromURL      = flag.String("from", "127.0.0.1:4430", "the tcp address and port this proxy should listen for requests on")
-	certFile     = flag.String("cert", "", "path to a tls certificate file. If not provided, ssl-proxy will generate one for you in ~/.ssl-proxy/")
-	keyFile      = flag.String("key", "", "path to a private key file. If not provided, ssl-proxy will generate one for you in ~/.ssl-proxy/")
-	domain       = flag.String("domain", "", "domain to mint letsencrypt certificates for. Usage of this parameter implies acceptance of the LetsEncrypt terms of service.")
-	redirectHTTP = flag.Bool("redirectHTTP", false, "if true, redirects http requests from port 80 to https at your fromURL")
+	to             = flag.String("to", "http://127.0.0.1:80", "the address and port for which to proxy requests to")
+	fromURL        = flag.String("from", "127.0.0.1:4430", "the tcp address and port this proxy should listen for requests on")
+	certFile       = flag.String("cert", "", "path to a tls certificate file. If not provided, ssl-proxy will generate one for you in ~/.ssl-proxy/")
+	keyFile        = flag.String("key", "", "path to a private key file. If not provided, ssl-proxy will generate one for you in ~/.ssl-proxy/")
+	domain         = flag.String("domain", "", "domain to mint letsencrypt certificates for. Usage of this parameter implies acceptance of the LetsEncrypt terms of service.")
+	redirectHTTP   = flag.Bool("redirectHTTP", false, "if true, redirects http requests from port 80 to https at your fromURL")
+	trustedProxies = flag.String("trusted-proxies", "", "comma-separated trusted proxy IPs or CIDRs whose X-Forwarded-For chains may influence client identity; empty (default) means only the direct peer address is trusted and all client-supplied forwarding headers are discarded")
 )
 
 const (
@@ -81,9 +83,15 @@ func main() {
 	}
 
 	// Setup reverse proxy ServeMux
-	p := reverseproxy.Build(toURL)
+	trustedNetworks, err := clientidentity.ParseTrustedProxies(strings.Split(*trustedProxies, ","))
+	if err != nil {
+		log.Fatal(err)
+	}
+	resolver := clientidentity.NewResolver(trustedNetworks)
+
+	p := reverseproxy.BuildWithIdentity(toURL, resolver)
 	mux := http.NewServeMux()
-	mux.Handle("/", p)
+	mux.Handle("/", resolver.Middleware(clientidentity.LogMiddleware(log.Default(), p)))
 
 	log.Printf(green("Proxying calls from https://%s (SSL/TLS) to %s"), *fromURL, toURL)
 
